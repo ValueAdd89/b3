@@ -2,35 +2,45 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from engine import AdvancedTradingEngine
+from engine import PolygonTradingEngine
 import time
 
-st.set_page_config(page_title="Atlas Trading Suite", layout="wide", initial_sidebar_state="collapsed")
-st.title("⚡ Atlas Multi-Dimensional Order Flow Engine")
+st.set_page_config(page_title="Atlas Equity Suite", layout="wide")
+st.title("🏛️ Atlas Professional Stock Liquidity Dashboard")
 
-# Initialize Engine
-if "adv_engine" not in st.session_state:
-    st.session_state.adv_engine = AdvancedTradingEngine(symbol="btcusdt", max_history=60)
-    st.session_state.adv_engine.start()
+# --- SECURE CREDENTIAL CHECK ---
+st.sidebar.subheader("Configuration Panel")
+poly_api_key = st.sidebar.text_input("Enter Polygon.io API Key", type="password")
+selected_stock = st.sidebar.selectbox("Select Equity Ticker", ["NVDA", "AAPL", "TSLA", "AMD", "SPY", "QQQ"])
+
+if not poly_api_key:
+    st.info("🔑 Please enter your private Polygon.io key in the left sidebar to unlock the equities streaming pipeline.")
+    st.stop()
+
+# --- INSTANTIATE BACKGROUND CLIENT ---
+if "poly_engine" not in st.session_state or st.session_state.get("current_ticker") != selected_stock:
+    # If ticker changes, reset engine configuration seamlessly
+    st.session_state.poly_engine = PolygonTradingEngine(api_key=poly_api_key, symbol=selected_stock, max_history=60)
+    st.session_state.poly_engine.start()
+    st.session_state.current_ticker = selected_stock
     time.sleep(1.5)
 
-engine = st.session_state.adv_engine
+engine = st.session_state.poly_engine
 history, live_bids, live_asks, current_price, footprint, alerts = engine.get_snapshot()
 
 if current_price == 0:
-    st.warning("Connecting to global WebSockets exchange infrastructure...")
+    st.warning(f"Connecting to Polygon.io clusters. Awaiting first matching trades or quotes for {selected_stock}...")
     time.sleep(1)
     st.rerun()
 
-# Layout Configuration Matrix
-tab1, tab2, tab3 = st.tabs(["📊 Orderflow & Footprint Profile", "🎛️ Option Gamma Position Maps", "🚨 Real-Time Tape Alerts"])
+# --- DISPLAY STREAMING DASHBOARD PANELS ---
+tab1, tab2 = st.tabs(["📊 Real-Time Liquidity Maps", "🚨 Tape Block Feed"])
 
-# --- TAB 1: FOOTPRINT & ORDERFLOW ---
 with tab1:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.subheader("Microsecond Price Heatmap")
+        st.subheader("NBBO Spread History Tracking")
         times, prices, volumes, types = [], [], [], []
         for frame in history:
             for p, q in frame["bids"].items():
@@ -41,70 +51,46 @@ with tab1:
         if times:
             df = pd.DataFrame({"Time": times, "Price": prices, "Volume": volumes, "Type": types})
             fig = go.Figure()
-            # Bids Grid Overlay
+            # Plot Bid spread layer
             b_df = df[df["Type"]=="Bid"]
-            fig.add_trace(go.Scatter(x=b_df["Time"], y=b_df["Price"], mode="markers", marker=dict(size=6, color=b_df["Volume"], colorscale="Greens", showscale=False), name="Bids"))
-            # Asks Grid Overlay
+            fig.add_trace(go.Scatter(x=b_df["Time"], y=b_df["Price"], mode="markers+lines", marker=dict(size=5, color="green"), name="National Best Bid"))
+            # Plot Ask spread layer
             a_df = df[df["Type"]=="Ask"]
-            fig.add_trace(go.Scatter(x=a_df["Time"], y=a_df["Price"], mode="markers", marker=dict(size=6, color=a_df["Volume"], colorscale="Reds", showscale=False), name="Asks"))
+            fig.add_trace(go.Scatter(x=a_df["Time"], y=a_df["Price"], mode="markers+lines", marker=dict(size=5, color="red"), name="National Best Ask"))
             
-            fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0), yaxis=dict(range=[current_price*0.999, current_price*1.001]))
+            fig.update_layout(template="plotly_dark", height=420, margin=dict(l=10,r=10,t=10,b=10))
             st.plotly_chart(fig, use_container_width=True)
-
+            
     with col2:
-        st.subheader("Volume Footprint Clusters")
-        # Format footprints into visual bid-ask components
+        st.subheader("Intraday Share Footprint")
         if footprint:
-            fp_prices = sorted(list(footprint.keys()))[-12:] # Show top 12 active bands
+            fp_prices = sorted(list(footprint.keys()))[-15:] # Capture last 15 active pricing bands
             bids_f = [footprint[p]["Bid_Vol"] for p in fp_prices]
             asks_f = [footprint[p]["Ask_Vol"] for p in fp_prices]
             
             fig_fp = go.Figure()
-            fig_fp.add_trace(go.Bar(y=fp_prices, x=bids_f, orientation='h', name="Aggressive Sells (Bid Side)", marker_color='red'))
-            fig_fp.add_trace(go.Bar(y=fp_prices, x=asks_f, orientation='h', name="Aggressive Buys (Ask Side)", marker_color='green'))
-            fig_fp.update_layout(barmode='relative', template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0))
+            fig_fp.add_trace(go.Bar(y=fp_prices, x=bids_f, orientation='h', name="Aggressive Sells", marker_color='red'))
+            fig_fp.add_trace(go.Bar(y=fp_prices, x=asks_f, orientation='h', name="Aggressive Buys", marker_color='green'))
+            fig_fp.update_layout(barmode='relative', template="plotly_dark", height=420, margin=dict(l=10,r=10,t=10,b=10))
             st.plotly_chart(fig_fp, use_container_width=True)
         else:
-            st.info("Awaiting execution transactions to populate clusters...")
+            st.caption("Listening for raw transaction volume prints...")
 
-# --- TAB 2: OPTIONS DEALER POSITIONING (GEX) ---
 with tab2:
-    st.subheader("Systemic Market Maker Gamma Configuration")
-    df_gex = engine.calculate_gamma_exposure()
-    
-    if not df_gex.empty:
-        # Locate systemic parameters
-        zero_gamma_idx = np.abs(df_gex["GEX_Billions"]).idxmin()
-        zero_gamma_strike = df_gex.loc[zero_gamma_idx, "Strike"]
-        
-        c1, c2 = st.columns([1, 3])
-        with c1:
-            st.metric("Estimated Zero Gamma Threshold", f"${zero_gamma_strike:,.2f}")
-            st.info("💡 Above Zero Gamma, volatility mean-reverts (stable). Below Zero Gamma, market-maker positioning forces aggressive hedging (high volatility).")
-            
-        with c2:
-            fig_gex = go.Figure()
-            # Dynamic Bar charting color mapped to risk metrics
-            colors = ['green' if x >= 0 else 'red' for x in df_gex["GEX_Billions"]]
-            fig_gex.add_trace(go.Bar(x=df_gex["Strike"], y=df_gex["GEX_Billions"], marker_color=colors, name="Net GEX ($)"))
-            fig_gex.add_vline(x=current_price, line_dash="dash", line_color="cyan", annotation_text="Spot Price")
-            fig_gex.update_layout(template="plotly_dark", height=400, xaxis_title="Options Strike Level ($)", yaxis_title="Net Open Interest Gamma ($ Exposure)")
-            st.plotly_chart(fig_gex, use_container_width=True)
+    st.subheader(f"Whale Alert Streaming Tape — {selected_stock}")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.metric("Unified Share Midpoint", f"${current_price:,.2f}")
+        total_b = sum(live_bids.values())
+        total_a = sum(live_asks.values())
+        st.metric("Immediate Best Bid/Ask Sizes", f"{total_b:,} Lots vs {total_a:,} Lots")
+    with c2:
+        if alerts:
+            for a in reversed(alerts):
+                st.warning(f"**{a['time']}** | {a['msg']}")
+        else:
+            st.info("Monitoring continuous tape strings for large block prints exceeding 10,000 shares...")
 
-# --- TAB 3: INSTITUTIONAL TAPE TRACKER ---
-with tab3:
-    st.subheader("Algorithmic Whales & Iceberg Feed Alerts")
-    if alerts:
-        for a in reversed(alerts):
-            # Render visual alert boxes based on algorithmic category parameters
-            if "ICEBERG" in a["type"]:
-                st.toast(f"Iceberg Detected: {a['msg']}")
-                st.error(f"**{a['time']}** | **{a['type']}** — {a['msg']}")
-            else:
-                st.warning(f"**{a['time']}** | **{a['type']}** — {a['msg']}")
-    else:
-        st.info("Scanning execution tape data for abnormal institutional block trades...")
-
-# Re-render loop cycle parameter
-time.sleep(1)
+# Run loops every 1.5 seconds to balance UI rendering load
+time.sleep(1.5)
 st.rerun()
